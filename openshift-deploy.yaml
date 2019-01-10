@@ -1,0 +1,149 @@
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: read-pods
+subjects:
+- kind: User
+  name: system:serviceaccount:myproject:default
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: "apps/v1beta2"
+kind: Deployment
+metadata:
+  name: play-clustered-chat
+  labels:
+    app: play-clustered-chat
+spec:
+  # The initial number of replicas, if adjusting this, make sure you also adjust
+  # the REQUIRED_CONTACT_POINT_NR environment variable.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: play-clustered-chat
+
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+
+  template:
+    metadata:
+      labels:
+        app: play-clustered-chat
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: play-clustered-chat
+          image: "play-clustered-chat:0.2"
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            httpGet:
+              path: "/ready"
+              port: management
+            periodSeconds: 10
+            initialDelaySeconds: 30
+          livenessProbe:
+            httpGet:
+              path: "/alive"
+              port: management
+            periodSeconds: 10
+            failureThreshold: 10
+            initialDelaySeconds: 30
+          env:
+            # This is referenced from application.conf, and should match the number of replicas
+            - name: REQUIRED_CONTACT_POINT_NR
+              value: "3"
+            - name: JAVA_OPTS
+              value: "-Xms128m -Xmx256m"
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KEYSTORE_JKS
+              value: /var/run/secrets/akka/keystores/keystore.jks
+            - name: TRUSTSTORE_JKS
+              value: /var/run/secrets/akka/keystores/truststore.jks
+            - name: JKS_PASSWORD
+              value: changeit
+          ports:
+            - name: management
+              containerPort: 8558
+          resources:
+            limits:
+              cpu: 0.25
+              memory: 512Mi
+            requests:
+              cpu: 0.25
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /var/run/secrets/akka/keystores
+              name: akka-keystore-volume
+
+      initContainers:
+        - name: pem-to-keystore
+          image: registry.access.redhat.com/redhat-sso-7/sso71-openshift:1.1-16
+          env:
+            - name: keyfile
+              value: /var/run/secrets/openshift.io/akka_remoting_cert/tls.key
+            - name: crtfile
+              value: /var/run/secrets/openshift.io/akka_remoting_cert/tls.crt
+            - name: keystore_pkcs12
+              value: /var/run/secrets/akka/keystores/keystore.pkcs12
+            - name: keystore_jks
+              value: /var/run/secrets/akka/keystores/keystore.jks
+            - name: ca_bundle
+              value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+            - name: truststore_jks
+              value: /var/run/secrets/akka/keystores/truststore.jks
+            - name: password
+              value: changeit
+          command: ['/bin/bash']
+          args: ['-c', "openssl pkcs12 -export -inkey $keyfile -in $crtfile -out $keystore_pkcs12 -password pass:$password && keytool -importkeystore -noprompt -srckeystore $keystore_pkcs12 -srcstoretype pkcs12 -destkeystore $keystore_jks -storepass $password -srcstorepass $password && csplit -z -f crt- $ca_bundle '/-----BEGIN CERTIFICATE-----/' '{*}' && for file in crt-*; do keytool -import -noprompt -keystore $truststore_jks -file $file -storepass changeit -alias service-$file; done"]
+          resources:
+            limits:
+              cpu: 0.25
+            requests:
+              cpu: 0.25
+          volumeMounts:
+            - name: akka-keystore-volume
+              mountPath: /var/run/secrets/akka/keystores
+            - name: akka-remoting-cert
+              mountPath: /var/run/secrets/openshift.io/akka_remoting_cert
+      volumes:
+        - name: akka-keystore-volume
+          emptyDir: {}
+        - name: akka-remoting-cert
+          secret:
+            secretName: play-clustered-chat-akka-remoting-cert
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.alpha.openshift.io/serving-cert-secret-name: play-clustered-chat-akka-remoting-cert
+  labels:
+    app: play-clustered-chat
+  name: play-clustered-chat
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 9000
+    - name: management
+      port: 8558
+  selector:
+    app: play-clustered-chat
+  type: LoadBalancer
