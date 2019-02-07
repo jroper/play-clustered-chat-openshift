@@ -4,10 +4,10 @@ val AkkaManagementVersion = "0.20.0+4-8c494a9a+20181211-1127"
 val PlaySocketIoVersion = "1.0.0-beta-2"
 
 lazy val `play-clustered-chat` = (project in file("."))
-  .enablePlugins(PlayScala)
+  .enablePlugins(PlayScala, DockerPlugin)
   .settings(
     organization := "com.example",
-    version := "0.2",
+    version := "0.3",
     scalaVersion := "2.12.8",
 
     libraryDependencies ++= Seq(
